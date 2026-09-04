@@ -1,0 +1,29 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+
+# Local dataset links, raw videos, and generated image datasets
+/OpenNeoData
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+/data/tactile*
+/data/generated/
+
+# Training outputs and experiment trackers
+/outputs/
+/runs/
+/wandb/
+*.log
+
+# Local editor and operating-system files
+.DS_Store
+.vscode/
+.idea/
