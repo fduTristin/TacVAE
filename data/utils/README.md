@@ -1,7 +1,7 @@
 # 触觉视频转 AutoencoderKL 图像数据集
 
 `extract_tactile_video_frames.py` 用于把触觉视频转换成可以被 Diffusers
-`train_autoencoderkl.py` 直接读取的图像目录。它针对硅胶指尖图像大部分时间不形变的特点，避免把大量重复的静态帧直接送进 AE 训练。
+`train_autoencoderkl.py` 直接读取的图像目录。它针对硅胶指尖图像大部分时间不形变的特点，避免把大量重复的静态帧直接送进 AE 训练。对于 LeRobot 数据集，脚本会按 episode 重置参考帧，而不是把整个视频文件当成一个 episode。
 
 ## 快速开始
 
@@ -35,11 +35,13 @@ python data/utils/extract_tactile_video_frames.py --help
 
 ## 筛选逻辑
 
-每个视频独立执行以下流程：
+标准 LeRobot 数据集会自动发现 `meta/episodes/`。该目录记录了每个 episode 在视频文件中的起止时间；也可以通过 `--episodes-dir` 显式指定。当 episode 元数据可用时，每个视频中的每个 episode 独立执行以下流程：
 
-1. 第一帧作为该视频的无形变参考图，并且始终加入数据集。
+如果输入不是标准 LeRobot 数据集且找不到 episode 元数据，脚本会退回到每个视频使用一个参考帧，并打印 warning。对于包含多个 episode 的视频，不应依赖这个退回行为。
+
+1. episode 的第一帧作为该 episode 的无形变参考图，并且始终作为 neutral 候选。
 2. 按 `--frame-stride` 解码并评估视频帧。默认每 5 个源帧评估一次。
-3. 把当前帧和参考帧缩小为灰度图，默认缩小宽度为 160 像素，并计算归一化平均绝对差：
+3. 把当前帧和该 episode 的参考帧缩小为灰度图，默认缩小宽度为 160 像素，并计算归一化平均绝对差：
 
    ```text
    difference = mean(abs(current_gray - reference_gray)) / 255
@@ -47,7 +49,7 @@ python data/utils/extract_tactile_video_frames.py --help
 
 4. `difference > --threshold` 的帧视为 `deformed`，否则视为 `neutral`。默认阈值为 `0.015`。
 5. 通过 `--min-deformed-gap` 限制同一视频中形变帧的最小源帧间距，避免一个持续形变被保存成大量近乎重复的图片。
-6. 在静态候选帧中均匀选择无形变图，使每个视频的无形变样本比例约为 `--neutral-ratio`。默认目标比例为 `25%`，但每个视频至少保留第一帧。
+6. 在每个 episode 的静态候选帧中均匀选择无形变图，使每个 episode 的无形变样本比例约为 `--neutral-ratio`。默认目标比例为 `25%`，并且每个 episode 至少保留其第一帧。
 
 默认使用整幅图像计算差异。如果边缘、线缆或光照变化导致误检，可以使用归一化 ROI：
 
@@ -74,7 +76,7 @@ ROI 的顺序是 `X0 Y0 X1 Y1`，取值范围是 `0` 到 `1`。如果局部形�
 ```text
 data/tactile_ae_dataset/
 ├── train/
-│   ├── chunk-000__file-000__frame-00000000__neutral.png
+│   ├── chunk-000__file-000__episode-000000__frame-00000000__neutral.png
 │   └── ...
 ├── validation/
 │   └── ...
@@ -89,12 +91,13 @@ data/tactile_ae_dataset/
 
 - 输出图片路径
 - 原始视频路径和视频 ID
+- episode ID、episode 起止帧和 episode 参考帧
 - 原始帧号和时间
 - `neutral` 或 `deformed` 类别
 - 差异分数和使用的阈值
 - 原始图像尺寸及输出尺寸
 
-`summary.json` 包含每个视频的分数分布、解码帧数和最终选择数量。调阈值时重点观察 `score_quantiles`：如果大量静态视频的 `p95` 已经接近阈值，应该提高阈值；如果明显形变的最大分数仍低于阈值，应该降低阈值或缩小 ROI。
+`summary.json` 包含每个视频和 episode 的分数分布、解码帧数、参考帧和最终选择数量。调阈值时重点观察 `score_quantiles`：如果大量静态视频的 `p95` 已经接近阈值，应该提高阈值；如果明显形变的最大分数仍低于阈值，应该降低阈值或缩小 ROI。
 
 ## 常用参数
 
@@ -107,6 +110,7 @@ data/tactile_ae_dataset/
 | `--max-videos` | `0` | 最多处理视频数，`0` 表示全部 |
 | `--max-frames-per-video` | `0` | 每个视频最多扫描的源帧数，`0` 表示完整扫描；适合快速 smoke test |
 | `--video-start` | `0` | 排序后跳过的视频数 |
+| `--episodes-dir` | 自动发现 | LeRobot episode parquet 目录；用于在一个视频内按 episode 重置参考帧 |
 | `--frame-stride` | `5` | 每隔多少源帧评估一帧 |
 | `--min-deformed-gap` | `15` | 同一视频形变样本的最小帧间距 |
 | `--neutral-ratio` | `0.25` | 目标无形变样本比例 |
@@ -155,7 +159,7 @@ data/tactile_ae_dataset/
 
 ## 用于 AutoencoderKL 训练
 
-转换器默认输出 `512x512` 方形 RGB 图片，且 `letterbox` 保留原始 `640x360` 触觉画面的完整内容。这和示例训练脚本的默认 `--resolution 512` 一致，可以避免示例脚本的 `CenterCrop` 再次截掉左右区域。
+转换器默认输出 `512x512` 方形 RGB 图片，且 `letterbox` 保留原始 `640x360` 触觉画面的完整内容。这和示例训练脚本的默认 `--resolution 512` 一致，可以避免示例脚本的 `CenterCrop` 再次截掉左右区域。对于包含多个 episode 的视频，参考帧由 `meta/episodes` 中对应 episode 的起始帧确定。
 
 先读取脚本生成的验证图片列表：
 
@@ -182,7 +186,7 @@ accelerate launch train_autoencoderkl.py \
 
 如果选择了其他 `--output-resolution`，训练时要把 `--resolution` 改成相同的值。训练代码只读取图片列，不使用 `neutral/deformed` 字符串作为标签；这些类别主要用于检查数据比例。
 
-验证集按视频划分，而不是按帧随机划分。同一个视频的帧不会同时进入 train 和 validation，可以减少相邻视频帧造成的验证指标虚高。
+验证集按视频划分，而不是按帧随机划分。同一个视频的帧不会同时进入 train 和 validation，可以减少相邻视频帧造成的验证指标虚高；但每个视频内部的参考帧和形变判断仍然按 episode 独立进行。
 
 ## 环境检查
 
@@ -190,7 +194,7 @@ accelerate launch train_autoencoderkl.py \
 
 ```bash
 conda activate tacvae
-python -c "import av, numpy, PIL, tqdm; print('dependencies are available')"
+python -c "import av, numpy, PIL, pyarrow, tqdm; print('dependencies are available')"
 ```
 
 本实现使用 PyAV 解码 HEVC，不要求 OpenCV。数据集输出、训练输出、日志和原始数据链接都会由 TacVAE 根目录的 `.gitignore` 忽略，不应把生成图片或原始视频提交到 Git。

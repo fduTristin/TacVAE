@@ -36,9 +36,35 @@ VIDEO_SUFFIXES = {".avi", ".m4v", ".mov", ".mp4", ".webm", ".mkv"}
 
 @dataclass(frozen=True)
 class Candidate:
+    episode_index: int
+    reference_frame_index: int
     frame_index: int
     difference: float
     category: str
+
+
+@dataclass(frozen=True)
+class EpisodeRecord:
+    episode_index: int
+    from_timestamp: float
+    to_timestamp: float
+
+
+@dataclass(frozen=True)
+class EpisodeBoundary:
+    episode_index: int
+    from_frame: int
+    to_frame: int
+    from_timestamp: float
+    to_timestamp: float
+
+
+@dataclass
+class EpisodeScan:
+    boundary: EpisodeBoundary
+    neutral_candidates: list[Candidate]
+    deformed_candidates: list[Candidate]
+    scores: list[float]
 
 
 @dataclass
@@ -51,8 +77,7 @@ class VideoScan:
     fps: float
     decoded_frames: int
     evaluated_frames: int
-    neutral_candidates: list[Candidate]
-    deformed_candidates: list[Candidate]
+    episodes: list[EpisodeScan]
     score_min: float
     score_max: float
     score_mean: float
@@ -177,6 +202,15 @@ def parse_args() -> argparse.Namespace:
         help="Skip this many videos after sorting source paths. Default: 0.",
     )
     parser.add_argument(
+        "--episodes-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory containing LeRobot episode parquet files. It is discovered automatically for a standard "
+            "dataset layout; set this when the video directory is mounted separately."
+        ),
+    )
+    parser.add_argument(
         "--max-deformed-per-video",
         type=int,
         default=0,
@@ -298,6 +332,134 @@ def discover_videos(source: Path) -> list[Path]:
     return videos
 
 
+def find_dataset_root(source: Path) -> Path | None:
+    start = source if source.is_dir() else source.parent
+    for parent in (start, *start.parents):
+        if (parent / "videos").is_dir() and (parent / "meta" / "episodes").is_dir():
+            return parent
+    return None
+
+
+def video_key_for_path(path: Path, dataset_root: Path) -> str:
+    videos_root = dataset_root / "videos"
+    relative = path.relative_to(videos_root)
+    if len(relative.parts) < 3:
+        raise ValueError(
+            f"Video path must follow <dataset>/videos/<video_key>/chunk-XXX/file-XXX.mp4: {path}"
+        )
+    return "/".join(relative.parts[:-2])
+
+
+def episode_metadata_columns(video_key: str) -> tuple[str, ...]:
+    prefix = f"videos/{video_key}"
+    return (
+        "episode_index",
+        f"{prefix}/chunk_index",
+        f"{prefix}/file_index",
+        f"{prefix}/from_timestamp",
+        f"{prefix}/to_timestamp",
+    )
+
+
+def load_episode_records(
+    videos: list[Path], source: Path, episodes_dir: Path | None
+) -> tuple[
+    dict[tuple[str, int, int], list[EpisodeRecord]] | None,
+    Path | None,
+    Path | None,
+]:
+    dataset_root = find_dataset_root(source)
+    if episodes_dir is None:
+        if dataset_root is None:
+            return None, None, None
+        episodes_dir = dataset_root / "meta" / "episodes"
+    else:
+        episodes_dir = episodes_dir.expanduser().resolve()
+
+    if not episodes_dir.is_dir():
+        raise FileNotFoundError(f"Episode metadata directory does not exist: {episodes_dir}")
+    metadata_files = sorted(episodes_dir.rglob("*.parquet"), key=lambda path: path.as_posix())
+    if not metadata_files:
+        raise FileNotFoundError(f"No episode parquet files found under: {episodes_dir}")
+
+    if dataset_root is None:
+        dataset_root = episodes_dir.parent.parent
+    video_keys = {video_key_for_path(path, dataset_root) for path in videos}
+
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError as error:  # pragma: no cover - depends on the local environment
+        raise SystemExit(
+            "PyArrow is required to reset the reference frame for each episode. "
+            "Install it with `pip install pyarrow` or pass a video source without episode metadata."
+        ) from error
+
+    records: dict[tuple[str, int, int], list[EpisodeRecord]] = {}
+    for video_key in sorted(video_keys):
+        columns = episode_metadata_columns(video_key)
+        for metadata_file in metadata_files:
+            available_columns = set(parquet.read_schema(metadata_file).names)
+            if not set(columns).issubset(available_columns):
+                continue
+            for row in parquet.read_table(metadata_file, columns=list(columns)).to_pylist():
+                video_id = (
+                    video_key,
+                    int(row[f"videos/{video_key}/chunk_index"]),
+                    int(row[f"videos/{video_key}/file_index"]),
+                )
+                records.setdefault(video_id, []).append(
+                    EpisodeRecord(
+                        episode_index=int(row["episode_index"]),
+                        from_timestamp=float(row[f"videos/{video_key}/from_timestamp"]),
+                        to_timestamp=float(row[f"videos/{video_key}/to_timestamp"]),
+                    )
+                )
+
+    for video_key, chunk_index, file_index in (
+        (video_key_for_path(path, dataset_root), *video_file_indices(path)) for path in videos
+    ):
+        video_id = (video_key, chunk_index, file_index)
+        if video_id not in records:
+            raise ValueError(
+                f"No episode metadata found for video {video_key} chunk={chunk_index} file={file_index}"
+            )
+        records[video_id].sort(key=lambda record: record.from_timestamp)
+
+    return records, episodes_dir, dataset_root
+
+
+def video_file_indices(path: Path) -> tuple[int, int]:
+    try:
+        chunk_name, file_name = path.parent.name, path.stem
+        return int(chunk_name.removeprefix("chunk-")), int(file_name.removeprefix("file-"))
+    except ValueError as error:
+        raise ValueError(f"Video path must use chunk-XXX/file-XXX naming: {path}") from error
+
+
+def make_episode_boundaries(records: list[EpisodeRecord], fps: float) -> list[EpisodeBoundary]:
+    boundaries = [
+        EpisodeBoundary(
+            episode_index=record.episode_index,
+            from_frame=round(record.from_timestamp * fps),
+            to_frame=round(record.to_timestamp * fps),
+            from_timestamp=record.from_timestamp,
+            to_timestamp=record.to_timestamp,
+        )
+        for record in records
+    ]
+    if not boundaries or boundaries[0].from_frame != 0:
+        raise ValueError("Episode metadata must start at video frame 0")
+    for previous, current in zip(boundaries, boundaries[1:]):
+        if previous.to_frame != current.from_frame:
+            raise ValueError(
+                f"Episode frame ranges are not contiguous: {previous.episode_index} ends at "
+                f"{previous.to_frame}, {current.episode_index} starts at {current.from_frame}"
+            )
+    if any(boundary.to_frame <= boundary.from_frame for boundary in boundaries):
+        raise ValueError("Episode metadata contains an empty or negative frame range")
+    return boundaries
+
+
 def make_video_id(path: Path, source: Path) -> str:
     if source.is_dir():
         relative = path.relative_to(source).with_suffix("").as_posix()
@@ -367,12 +529,10 @@ def scan_video(
     split: str,
     video_id: str,
     args: argparse.Namespace,
+    episode_records: dict[tuple[str, int, int], list[EpisodeRecord]] | None,
+    dataset_root: Path | None,
 ) -> VideoScan:
-    neutral_candidates: list[Candidate] = []
-    deformed_candidates: list[Candidate] = []
     scores: list[float] = []
-    reference: np.ndarray | None = None
-    last_deformed_frame = -args.min_deformed_gap - 1
     decoded_frames = 0
     width = 0
     height = 0
@@ -388,18 +548,59 @@ def scan_video(
         if video_stream.average_rate is not None:
             fps = float(video_stream.average_rate)
 
+        if episode_records is not None:
+            if dataset_root is None:
+                raise ValueError("A dataset root is required when episode metadata is provided")
+            video_key = video_key_for_path(path, dataset_root)
+            chunk_index, file_index = video_file_indices(path)
+            records = episode_records[(video_key, chunk_index, file_index)]
+            boundaries = make_episode_boundaries(records, fps)
+        else:
+            boundaries = [
+                EpisodeBoundary(
+                    episode_index=0,
+                    from_frame=0,
+                    to_frame=0,
+                    from_timestamp=0.0,
+                    to_timestamp=0.0,
+                )
+            ]
+
+        episode_scans = [EpisodeScan(boundary, [], [], []) for boundary in boundaries]
+        episode_cursor = 0
+        reference: np.ndarray | None = None
+        last_deformed_frame = -args.min_deformed_gap - 1
+
         for frame_index, frame in enumerate(container.decode(video=video_stream.index)):
             if args.max_frames_per_video and frame_index >= args.max_frames_per_video:
                 break
             decoded_frames = frame_index + 1
-            if frame_index % args.frame_stride != 0:
+
+            while (
+                episode_cursor + 1 < len(boundaries)
+                and frame_index >= boundaries[episode_cursor].to_frame
+            ):
+                episode_cursor += 1
+                reference = None
+                last_deformed_frame = -args.min_deformed_gap - 1
+
+            boundary = boundaries[episode_cursor]
+            if frame_index < boundary.from_frame or (
+                boundary.to_frame and frame_index >= boundary.to_frame
+            ):
+                continue
+            is_episode_start = frame_index == boundary.from_frame
+            if frame_index % args.frame_stride != 0 and not is_episode_start:
                 continue
 
             current = metric_gray(frame, args.metric_width, tuple(args.roi))
-            if reference is None:
+            episode_scan = episode_scans[episode_cursor]
+            if is_episode_start:
                 reference = current.copy()
                 score = 0.0
             else:
+                if reference is None:
+                    raise RuntimeError(f"Missing reference frame for episode {boundary.episode_index}")
                 score = difference_score(
                     reference,
                     current,
@@ -407,19 +608,42 @@ def scan_video(
                     args.pixel_threshold,
                 )
             scores.append(score)
+            episode_scan.scores.append(score)
 
-            if frame_index == 0 or score <= args.threshold:
-                neutral_candidates.append(Candidate(frame_index, score, "neutral"))
+            if is_episode_start or score <= args.threshold:
+                episode_scan.neutral_candidates.append(
+                    Candidate(
+                        boundary.episode_index,
+                        boundary.from_frame,
+                        frame_index,
+                        score,
+                        "neutral",
+                    )
+                )
             elif frame_index - last_deformed_frame >= args.min_deformed_gap:
                 if (
                     args.max_deformed_per_video == 0
-                    or len(deformed_candidates) < args.max_deformed_per_video
+                    or len(episode_scan.deformed_candidates) < args.max_deformed_per_video
                 ):
-                    deformed_candidates.append(Candidate(frame_index, score, "deformed"))
+                    episode_scan.deformed_candidates.append(
+                        Candidate(
+                            boundary.episode_index,
+                            boundary.from_frame,
+                            frame_index,
+                            score,
+                            "deformed",
+                        )
+                    )
                     last_deformed_frame = frame_index
 
     if reference is None or not scores:
         raise RuntimeError(f"Could not decode an evaluable frame from {path}")
+    if episode_records is not None and decoded_frames >= boundaries[-1].to_frame:
+        if decoded_frames != boundaries[-1].to_frame:
+            raise ValueError(
+                f"Decoded frame count mismatch for {path}: decoded {decoded_frames}, "
+                f"episode metadata ends at {boundaries[-1].to_frame}"
+            )
     score_min, score_max, score_mean, score_quantiles = summarize_scores(scores)
     return VideoScan(
         path=path,
@@ -430,8 +654,7 @@ def scan_video(
         fps=fps,
         decoded_frames=decoded_frames,
         evaluated_frames=len(scores),
-        neutral_candidates=neutral_candidates,
-        deformed_candidates=deformed_candidates,
+        episodes=episode_scans,
         score_min=score_min,
         score_max=score_max,
         score_mean=score_mean,
@@ -463,20 +686,50 @@ def select_evenly(candidates: list[Candidate], count: int) -> list[Candidate]:
 
 
 def select_per_video(scan: VideoScan, args: argparse.Namespace) -> list[SelectedFrame]:
-    deformed = list(scan.deformed_candidates)
+    all_deformed = [
+        candidate
+        for episode in scan.episodes
+        for candidate in episode.deformed_candidates
+    ]
     if args.max_deformed_per_video:
-        deformed = deformed[: args.max_deformed_per_video]
-
-    if scan.deformed_candidates:
-        neutral_count = math.ceil(
-            len(deformed) * args.neutral_ratio / (1.0 - args.neutral_ratio)
-        )
+        deformed_keys = {
+            (candidate.episode_index, candidate.frame_index)
+            for candidate in select_evenly(all_deformed, args.max_deformed_per_video)
+        }
     else:
-        neutral_count = 1
-    neutral_count = max(1, neutral_count)
-    if args.max_neutral_per_video:
-        neutral_count = min(neutral_count, args.max_neutral_per_video)
-    neutral = select_evenly(scan.neutral_candidates, neutral_count)
+        deformed_keys = {
+            (candidate.episode_index, candidate.frame_index)
+            for candidate in all_deformed
+        }
+
+    neutral: list[Candidate] = []
+    deformed: list[Candidate] = []
+    for episode in scan.episodes:
+        episode_deformed = [
+            candidate
+            for candidate in episode.deformed_candidates
+            if (candidate.episode_index, candidate.frame_index) in deformed_keys
+        ]
+        neutral_count = (
+            math.ceil(len(episode_deformed) * args.neutral_ratio / (1.0 - args.neutral_ratio))
+            if episode_deformed
+            else 1
+        )
+        neutral.extend(select_evenly(episode.neutral_candidates, max(1, neutral_count)))
+        deformed.extend(episode_deformed)
+
+    if args.max_neutral_per_video and len(neutral) > args.max_neutral_per_video:
+        references = [
+            candidate for candidate in neutral if candidate.frame_index == candidate.reference_frame_index
+        ]
+        if args.max_neutral_per_video >= len(references):
+            remaining = select_evenly(
+                [candidate for candidate in neutral if candidate not in references],
+                args.max_neutral_per_video - len(references),
+            )
+            neutral = [*references, *remaining]
+        else:
+            neutral = select_evenly(neutral, args.max_neutral_per_video)
 
     selected = [SelectedFrame(scan, candidate) for candidate in [*neutral, *deformed]]
     selected.sort(key=lambda item: item.candidate.frame_index)
@@ -484,7 +737,7 @@ def select_per_video(scan: VideoScan, args: argparse.Namespace) -> list[Selected
 
 
 def select_global_cap(
-    selected: list[SelectedFrame], args: argparse.Namespace, video_count: int
+    selected: list[SelectedFrame], args: argparse.Namespace
 ) -> list[SelectedFrame]:
     if args.max_images == 0 or len(selected) <= args.max_images:
         return selected
@@ -494,27 +747,55 @@ def select_global_cap(
     if args.max_images == 1:
         return select_evenly(neutral or selected, 1)
     if not deformed:
+        references = {
+            (item.scan.video_id, item.candidate.episode_index): item
+            for item in neutral
+            if item.candidate.frame_index == item.candidate.reference_frame_index
+        }
+        if args.max_images >= len(references):
+            other_neutral = [
+                item
+                for item in neutral
+                if item.candidate.frame_index != item.candidate.reference_frame_index
+            ]
+            result = [
+                *references.values(),
+                *select_evenly(other_neutral, args.max_images - len(references)),
+            ]
+            result.sort(key=lambda item: (item.scan.split, item.scan.video_id, item.candidate.frame_index))
+            return result
         indices = np.rint(np.linspace(0, len(selected) - 1, args.max_images)).astype(int)
         return [selected[index] for index in indices]
 
+    references = {
+        (item.scan.video_id, item.candidate.episode_index): item
+        for item in neutral
+        if item.candidate.frame_index == item.candidate.reference_frame_index
+    }
     desired_neutral = max(1, round(args.max_images * args.neutral_ratio))
-    desired_neutral = min(desired_neutral, len(neutral), args.max_images - 1)
+    desired_neutral = max(desired_neutral, len(references))
+    desired_neutral = min(desired_neutral, len(neutral), args.max_images)
     desired_deformed = args.max_images - desired_neutral
     chosen_neutral = select_evenly(neutral, desired_neutral)
     chosen_deformed = select_evenly(deformed, desired_deformed)
     result = [*chosen_neutral, *chosen_deformed]
 
-    # Keep at least one reference image per video whenever the cap permits it.
-    if args.max_images >= video_count:
-        references = {
-            item.scan.video_id: item
-            for item in neutral
-            if item.candidate.frame_index == 0
+    # Keep at least one reference image per episode whenever the cap permits it.
+    if args.max_images >= len(references):
+        present = {
+            (item.scan.video_id, item.candidate.episode_index)
+            for item in result
         }
-        present = {item.scan.video_id for item in result}
-        missing = [item for video_id, item in references.items() if video_id not in present]
+        missing = [
+            item for key, item in references.items() if key not in present
+        ]
         if missing:
-            replaceable = [item for item in result if item.candidate.category == "neutral"]
+            replaceable = [
+                item
+                for item in result
+                if item.candidate.category == "neutral"
+                and item.candidate.frame_index != item.candidate.reference_frame_index
+            ]
             for replacement, required in zip(replaceable, missing):
                 result[result.index(replacement)] = required
 
@@ -545,7 +826,8 @@ def transform_image(image: Image.Image, resolution: int, mode: str) -> Image.Ima
 def output_path(output_dir: Path, item: SelectedFrame, image_format: str) -> Path:
     extension = "jpg" if image_format == "jpeg" else "png"
     filename = (
-        f"{item.scan.video_id}__frame-{item.candidate.frame_index:08d}"
+        f"{item.scan.video_id}__episode-{item.candidate.episode_index:06d}"
+        f"__frame-{item.candidate.frame_index:08d}"
         f"__{item.candidate.category}.{extension}"
     )
     return output_dir / item.scan.split / filename
@@ -553,11 +835,11 @@ def output_path(output_dir: Path, item: SelectedFrame, image_format: str) -> Pat
 
 def write_selected_images(
     selected: list[SelectedFrame], output_dir: Path, args: argparse.Namespace
-) -> dict[tuple[str, int], Path]:
+) -> dict[tuple[str, int, int], Path]:
     by_video: dict[Path, list[SelectedFrame]] = {}
     for item in selected:
         by_video.setdefault(item.scan.path, []).append(item)
-    written: dict[tuple[str, int], Path] = {}
+    written: dict[tuple[str, int, int], Path] = {}
 
     for source, items in tqdm(sorted(by_video.items(), key=lambda pair: pair[0].as_posix()), desc="Writing images"):
         targets = {item.candidate.frame_index: item for item in items}
@@ -580,7 +862,9 @@ def write_selected_images(
                     image.save(path, format="JPEG", quality=args.jpeg_quality, subsampling=0)
                 else:
                     image.save(path, format="PNG", compress_level=3)
-                written[(item.scan.video_id, item.candidate.frame_index)] = path
+                written[
+                    (item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)
+                ] = path
 
     if len(written) != len(selected):
         raise RuntimeError(f"Expected to write {len(selected)} images but wrote {len(written)}")
@@ -593,13 +877,14 @@ def selected_row(item: SelectedFrame, path: Path, output_dir: Path, args: argpar
         "image": str(path.relative_to(output_dir)),
         "source_video": str(item.scan.path),
         "video_id": item.scan.video_id,
+        "episode_index": item.candidate.episode_index,
         "frame_index": item.candidate.frame_index,
         "frame_time_sec": item.candidate.frame_index / item.scan.fps,
         "category": item.candidate.category,
         "difference": item.candidate.difference,
         "difference_metric": args.difference_metric,
         "threshold": args.threshold,
-        "reference_frame_index": 0,
+        "reference_frame_index": item.candidate.reference_frame_index,
         "source_width": item.scan.width,
         "source_height": item.scan.height,
         "output_resolution": args.output_resolution,
@@ -622,7 +907,7 @@ def write_outputs(
     image_paths = write_selected_images(selected, output_dir, args)
     rows: list[dict[str, Any]] = []
     for item in selected:
-        key = (item.scan.video_id, item.candidate.frame_index)
+        key = (item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)
         rows.append(selected_row(item, image_paths[key], output_dir, args))
 
     manifest_path = output_dir / "manifest.jsonl"
@@ -631,7 +916,7 @@ def write_outputs(
             manifest.write(json.dumps(row, ensure_ascii=True) + "\n")
 
     validation_paths = [
-        image_paths[(item.scan.video_id, item.candidate.frame_index)]
+        image_paths[(item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)]
         for item in selected
         if item.scan.split == "validation"
     ]
@@ -648,7 +933,12 @@ def write_outputs(
         "source": str(args.source.expanduser().resolve()),
         "output_dir": str(output_dir),
         "algorithm": {
-            "reference": "first decoded frame of each video",
+            "reference": (
+                "first frame of each episode from LeRobot episode metadata"
+                if args.episodes_dir
+                else "first decoded frame of each video"
+            ),
+            "episodes_dir": str(args.episodes_dir.expanduser().resolve()) if args.episodes_dir else None,
             "difference_metric": args.difference_metric,
             "threshold": args.threshold,
             "pixel_threshold": args.pixel_threshold,
@@ -668,6 +958,7 @@ def write_outputs(
             "image_format": args.image_format,
         },
         "video_count": len(scans),
+        "episode_count": sum(len(scan.episodes) for scan in scans),
         "image_count": len(selected),
         "split_counts": {
             split: {
@@ -692,6 +983,30 @@ def write_outputs(
                 "score_max": scan.score_max,
                 "score_mean": scan.score_mean,
                 "score_quantiles": scan.score_quantiles,
+                "episode_count": len(scan.episodes),
+                "episodes": [
+                    {
+                        "episode_index": episode.boundary.episode_index,
+                        "from_frame": episode.boundary.from_frame,
+                        "to_frame": episode.boundary.to_frame,
+                        "from_timestamp": episode.boundary.from_timestamp,
+                        "to_timestamp": episode.boundary.to_timestamp,
+                        "evaluated_frames": len(episode.scores),
+                        "selected_neutral": sum(
+                            item.scan.video_id == scan.video_id
+                            and item.candidate.episode_index == episode.boundary.episode_index
+                            and item.candidate.category == "neutral"
+                            for item in selected
+                        ),
+                        "selected_deformed": sum(
+                            item.scan.video_id == scan.video_id
+                            and item.candidate.episode_index == episode.boundary.episode_index
+                            and item.candidate.category == "deformed"
+                            for item in selected
+                        ),
+                    }
+                    for episode in scan.episodes
+                ],
                 "selected_neutral": sum(
                     item.scan.video_id == scan.video_id and item.candidate.category == "neutral"
                     for item in selected
@@ -732,9 +1047,13 @@ def print_statistics(scans: list[VideoScan], selected: list[SelectedFrame], dry_
             f"{prefix}{split}: neutral={counts[split]['neutral']} "
             f"deformed={counts[split]['deformed']}"
         )
-    no_deformation = sum(not scan.deformed_candidates for scan in scans)
+    no_deformation = sum(
+        bool(episode.scores) and not episode.deformed_candidates
+        for scan in scans
+        for episode in scan.episodes
+    )
     if no_deformation:
-        print(f"Warning: {no_deformation} video(s) had no frame above the threshold.")
+        print(f"Warning: {no_deformation} episode(s) had no frame above the threshold.")
 
 
 def main() -> None:
@@ -742,15 +1061,21 @@ def main() -> None:
     validate_args(args)
     source = args.source.expanduser().resolve()
     videos = discover_videos(source)
+    episode_records, episodes_dir, dataset_root = load_episode_records(videos, source, args.episodes_dir)
+    args.episodes_dir = episodes_dir
+    if args.episodes_dir is None and episode_records is None:
+        print("Warning: no episode metadata found; using one reference frame per video.")
+    elif episodes_dir is not None:
+        print(f"Using episode metadata from {episodes_dir}")
     split_video_entries = split_videos(videos, args, source)
     scans: list[VideoScan] = []
     for path, split, video_id in tqdm(split_video_entries, desc="Scanning videos"):
-        scans.append(scan_video(path, split, video_id, args))
+        scans.append(scan_video(path, split, video_id, args, episode_records, dataset_root))
 
     selected: list[SelectedFrame] = []
     for scan in scans:
         selected.extend(select_per_video(scan, args))
-    selected = select_global_cap(selected, args, len(scans))
+    selected = select_global_cap(selected, args)
     print_statistics(scans, selected, args.dry_run)
 
     if args.dry_run:
