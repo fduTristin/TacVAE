@@ -12,4 +12,40 @@ fi
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate tacvae
 
-exec python "${PROJECT_ROOT}/data/utils/extract_tactile_video_frames.py" "$@"
+# Edit these values for another video or another dataset split.
+DATASET_ROOT="/home/xhz/OpenNeoData/aloha"
+VIDEO_KEY="observation.images.left_wrist_left_tactile"
+VIDEO_CHUNK="000"
+VIDEO_FILE="138"
+
+SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}/chunk-${VIDEO_CHUNK}/file-${VIDEO_FILE}.mp4"
+EPISODES_DIR="${DATASET_ROOT}/meta/episodes"
+OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_file${VIDEO_FILE}"
+
+THRESHOLD="0.015"
+FRAME_STRIDE="2"
+MIN_DEFORMED_GAP="15"
+NEUTRAL_RATIO="0.25"
+VALIDATION_RATIO="0"
+OUTPUT_RESOLUTION="224"
+RESIZE_MODE="letterbox"
+IMAGE_FORMAT="jpeg"
+JPEG_QUALITY="95"
+VALIDATION_IMAGE_COUNT="0"
+
+exec python "${PROJECT_ROOT}/data/utils/extract_tactile_video_frames.py" \
+  --source "${SOURCE}" \
+  --episodes-dir "${EPISODES_DIR}" \
+  --output-dir "${OUTPUT_DIR}" \
+  --threshold "${THRESHOLD}" \
+  --frame-stride "${FRAME_STRIDE}" \
+  --min-deformed-gap "${MIN_DEFORMED_GAP}" \
+  --neutral-ratio "${NEUTRAL_RATIO}" \
+  --validation-ratio "${VALIDATION_RATIO}" \
+  --output-resolution "${OUTPUT_RESOLUTION}" \
+  --resize-mode "${RESIZE_MODE}" \
+  --image-format "${IMAGE_FORMAT}" \
+  --jpeg-quality "${JPEG_QUALITY}" \
+  --validation-image-count "${VALIDATION_IMAGE_COUNT}" \
+  --overwrite \
+  "$@"

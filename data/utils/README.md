@@ -8,23 +8,27 @@
 在 `TacVAE` 根目录执行：
 
 ```bash
-./scripts/prepare_tactile_ae_dataset.sh \
-  --source /home/xhz/OpenNeoData/aloha/videos/observation.images.left_wrist_left_tactile \
-  --threshold 0.015 \
-  --sample-count 200 \
-  --max-videos 2 \
-  --max-frames-per-video 3000 \
-  --overwrite
+./scripts/prepare_tactile_ae_dataset.sh
 ```
 
-`--sample-count` 是 `--max-images` 的别名。上面的命令只扫描前两个视频并最多写出 200 张图片，适合先验证环境和参数。默认输出目录是：
+当前脚本顶部内置了一个可直接修改的配置，默认完整处理 `file-138.mp4`，并输出到：
 
 ```text
-/home/xhz/TacVAE/data/tactile_ae_dataset
+/home/xhz/TacVAE/data/tactile_ae_dataset_file138
 ```
 
-不指定 `--source` 时，脚本默认使用题目中给出的
-`observation.images.left_wrist_left_tactile` 目录。不指定 `--output-dir` 时，输出到上述默认目录。
+需要处理其他文件时，直接修改 `scripts/prepare_tactile_ae_dataset.sh` 顶部的 `VIDEO_CHUNK`、`VIDEO_FILE` 和参数变量。脚本末尾也会追加命令行参数，因此可以临时覆盖配置；例如只做局部 smoke test：
+
+```bash
+./scripts/prepare_tactile_ae_dataset.sh \
+  --max-images 200 \
+  --max-frames-per-video 3000
+```
+
+`--sample-count` 是 `--max-images` 的别名。完整处理时不要设置 `--max-images` 或 `--max-frames-per-video`。
+
+直接调用 Python 脚本时，不指定 `--source` 会使用题目中给出的
+`observation.images.left_wrist_left_tactile` 目录；使用 bash 包装脚本时，则以脚本顶部的 `SOURCE` 和 `OUTPUT_DIR` 配置为准。
 
 脚本会自动激活 `tacvae` conda 环境。也可以直接执行 Python 脚本：
 
@@ -147,6 +151,8 @@ data/tactile_ae_dataset/
 
 ```bash
 ./scripts/prepare_tactile_ae_dataset.sh \
+  --source /home/xhz/OpenNeoData/aloha/videos/observation.images.left_wrist_left_tactile \
+  --output-dir /home/xhz/TacVAE/data/tactile_ae_dataset \
   --threshold 0.015 \
   --frame-stride 5 \
   --min-deformed-gap 15 \
