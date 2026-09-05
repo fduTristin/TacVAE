@@ -182,6 +182,34 @@ data/tactile_ae_dataset/
 
 转换器默认输出 `512x512` 方形 RGB 图片，且 `letterbox` 保留原始 `640x360` 触觉画面的完整内容。这和示例训练脚本的默认 `--resolution 512` 一致，可以避免示例脚本的 `CenterCrop` 再次截掉左右区域。对于包含多个 episode 的视频，参考帧由 `meta/episodes` 中对应 episode 的起始帧确定。
 
+当前正式训练配置已经集中在 `scripts/train_tactile_autoencoderkl.sh`。全量 `224x224` 数据集生成完成后，直接执行：
+
+```bash
+./scripts/train_tactile_autoencoderkl.sh
+```
+
+脚本默认使用：
+
+```text
+dataset: data/tactile_ae_dataset_full
+GPU: 5
+per-device batch size: 64
+max train steps: 30000
+perceptual scale: 0.05
+GAN: disabled until step 1000000000
+output: outputs/tactile-aekl-formal-bs64
+```
+
+需要调整 GPU、batch size、训练步数或 loss 权重时，直接编辑该脚本顶部的配置变量。也可以临时追加训练参数覆盖脚本默认值，例如：
+
+```bash
+./scripts/train_tactile_autoencoderkl.sh \
+  --max_train_steps 1000 \
+  --output_dir /mnt/sdc/xhz/TacVAE/outputs/tactile-aekl-smoke-full
+```
+
+训练脚本会先检查 `train/`、`validation_images.txt` 和所有验证图片是否存在，再启动 `accelerate`。不要在正式训练命令中添加 `--scale_lr`，除非你明确希望根据 batch size 和 GPU 数量放大学习率。
+
 先读取脚本生成的验证图片列表：
 
 ```bash
