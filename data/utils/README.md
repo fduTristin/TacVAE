@@ -17,6 +17,8 @@
 /home/xhz/TacVAE/data/tactile_ae_dataset_file138
 ```
 
+单文件模式默认使用 `validation_ratio=0.1`，并按 episode 划分 train/validation；同一个 episode 的帧不会同时出现在两个 split 中。
+
 需要处理其他文件时，直接修改 `scripts/prepare_tactile_ae_dataset.sh` 顶部的 `VIDEO_CHUNK`、`VIDEO_FILE` 和参数变量。脚本末尾也会追加命令行参数，因此可以临时覆盖配置；例如只做局部 smoke test：
 
 ```bash
@@ -39,6 +41,8 @@ VIDEO_FILE="all"
 ```text
 /home/xhz/TacVAE/data/tactile_ae_dataset_full
 ```
+
+全量模式仍按完整视频划分 train/validation，避免相邻 episode 或帧造成跨 split 泄漏。
 
 `VIDEO_CHUNK` 和 `VIDEO_FILE` 必须同时设为 `all`；不能只设置其中一个。全量处理时不要设置 `--max-videos`、`--max-images` 或 `--max-frames-per-video`。
 
@@ -135,7 +139,8 @@ data/tactile_ae_dataset/
 | `--neutral-ratio` | `0.25` | 目标无形变样本比例 |
 | `--max-deformed-per-video` | `0` | 单视频形变样本上限 |
 | `--max-neutral-per-video` | `0` | 单视频无形变样本上限 |
-| `--validation-ratio` | `0.1` | 按视频切分验证集 |
+| `--validation-ratio` | `0.1` | 按 `--validation-unit` 切分验证集 |
+| `--validation-unit` | `video` | `video` 按视频切分，`episode` 按每个视频内的 episode 切分 |
 | `--output-resolution` | `512` | 输出方形图片边长，必须被 8 整除 |
 | `--resize-mode` | `letterbox` | `letterbox` 保留完整视野，避免中心裁剪硅胶区域 |
 | `--image-format` | `png` | `png` 或 `jpeg` |
@@ -235,7 +240,7 @@ accelerate launch train_autoencoderkl.py \
 
 如果选择了其他 `--output-resolution`，训练时要把 `--resolution` 改成相同的值。训练代码只读取图片列，不使用 `neutral/deformed` 字符串作为标签；这些类别主要用于检查数据比例。
 
-验证集按视频划分，而不是按帧随机划分。同一个视频的帧不会同时进入 train 和 validation，可以减少相邻视频帧造成的验证指标虚高；但每个视频内部的参考帧和形变判断仍然按 episode 独立进行。
+默认验证集按视频划分，而不是按帧随机划分。同一个视频的帧不会同时进入 train 和 validation，可以减少相邻视频帧造成的验证指标虚高。需要在单个视频内建立验证集时，使用 `--validation-unit episode`；此时按完整 episode 划分，同一个 episode 的帧不会同时进入 train 和 validation，而每个 episode 的参考帧和形变判断仍然独立进行。
 
 ## 环境检查
 

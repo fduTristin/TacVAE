@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Build an ImageFolder-compatible dataset from tactile MP4 videos.
 
-The first decoded frame of each video is treated as the neutral reference.
-Frames whose downsampled grayscale difference from that reference exceeds the
-configured threshold are retained as deformed samples. Neutral samples are
-then selected separately so static frames cannot dominate the dataset.
+For LeRobot datasets, the first frame of each episode is treated as that
+episode's neutral reference. Frames whose downsampled grayscale difference
+from that reference exceeds the configured threshold are retained as deformed
+samples. Neutral samples are then selected separately so static frames cannot
+dominate the dataset.
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ class EpisodeBoundary:
 @dataclass
 class EpisodeScan:
     boundary: EpisodeBoundary
+    split: str
     neutral_candidates: list[Candidate]
     deformed_candidates: list[Candidate]
     scores: list[float]
@@ -88,6 +90,7 @@ class VideoScan:
 class SelectedFrame:
     scan: VideoScan
     candidate: Candidate
+    split: str
 
 
 def project_root() -> Path:
@@ -226,7 +229,16 @@ def parse_args() -> argparse.Namespace:
         "--validation-ratio",
         type=float,
         default=0.1,
-        help="Fraction of videos assigned to validation. Set to 0 to disable validation. Default: 0.1.",
+        help="Fraction assigned to validation according to --validation-unit. Set to 0 to disable validation. Default: 0.1.",
+    )
+    parser.add_argument(
+        "--validation-unit",
+        choices=["video", "episode"],
+        default="video",
+        help=(
+            "Split validation by complete videos or by episodes within each video. "
+            "Default: video."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -480,9 +492,12 @@ def split_videos(videos: list[Path], args: argparse.Namespace, source: Path) -> 
     if args.validation_ratio == 0.0:
         validation_count = 0
     else:
-        if len(shuffled) < 2:
+        if args.validation_unit == "video" and len(shuffled) < 2:
             raise ValueError("At least two videos are required when --validation-ratio is non-zero")
-        validation_count = max(1, min(len(shuffled) - 1, math.ceil(len(shuffled) * args.validation_ratio)))
+        if args.validation_unit == "video":
+            validation_count = max(1, min(len(shuffled) - 1, math.ceil(len(shuffled) * args.validation_ratio)))
+        else:
+            validation_count = 0
 
     validation = set(shuffled[:validation_count])
     result = []
@@ -490,6 +505,29 @@ def split_videos(videos: list[Path], args: argparse.Namespace, source: Path) -> 
         split = "validation" if path in validation else "train"
         result.append((path, split, make_video_id(path, source)))
     return result
+
+
+def split_episodes(scans: list[VideoScan], args: argparse.Namespace) -> None:
+    if args.validation_unit != "episode":
+        return
+    if args.validation_ratio == 0.0:
+        return
+
+    for scan in scans:
+        if len(scan.episodes) < 2:
+            raise ValueError(
+                f"At least two episodes are required for episode-level validation: {scan.path}"
+            )
+        shuffled = list(scan.episodes)
+        random.Random(f"{args.seed}:{scan.video_id}").shuffle(shuffled)
+        validation_count = max(
+            1,
+            min(len(shuffled) - 1, math.ceil(len(shuffled) * args.validation_ratio)),
+        )
+        validation = {episode.boundary.episode_index for episode in shuffled[:validation_count]}
+        scan.split = "mixed"
+        for episode in scan.episodes:
+            episode.split = "validation" if episode.boundary.episode_index in validation else "train"
 
 
 def metric_gray(frame: av.VideoFrame, metric_width: int, roi: tuple[float, float, float, float]) -> np.ndarray:
@@ -566,7 +604,7 @@ def scan_video(
                 )
             ]
 
-        episode_scans = [EpisodeScan(boundary, [], [], []) for boundary in boundaries]
+        episode_scans = [EpisodeScan(boundary, split, [], [], []) for boundary in boundaries]
         episode_cursor = 0
         reference: np.ndarray | None = None
         last_deformed_frame = -args.min_deformed_gap - 1
@@ -731,7 +769,11 @@ def select_per_video(scan: VideoScan, args: argparse.Namespace) -> list[Selected
         else:
             neutral = select_evenly(neutral, args.max_neutral_per_video)
 
-    selected = [SelectedFrame(scan, candidate) for candidate in [*neutral, *deformed]]
+    episode_splits = {episode.boundary.episode_index: episode.split for episode in scan.episodes}
+    selected = [
+        SelectedFrame(scan, candidate, episode_splits[candidate.episode_index])
+        for candidate in [*neutral, *deformed]
+    ]
     selected.sort(key=lambda item: item.candidate.frame_index)
     return selected
 
@@ -762,7 +804,7 @@ def select_global_cap(
                 *references.values(),
                 *select_evenly(other_neutral, args.max_images - len(references)),
             ]
-            result.sort(key=lambda item: (item.scan.split, item.scan.video_id, item.candidate.frame_index))
+            result.sort(key=lambda item: (item.split, item.scan.video_id, item.candidate.frame_index))
             return result
         indices = np.rint(np.linspace(0, len(selected) - 1, args.max_images)).astype(int)
         return [selected[index] for index in indices]
@@ -799,7 +841,7 @@ def select_global_cap(
             for replacement, required in zip(replaceable, missing):
                 result[result.index(replacement)] = required
 
-    result.sort(key=lambda item: (item.scan.split, item.scan.video_id, item.candidate.frame_index))
+    result.sort(key=lambda item: (item.split, item.scan.video_id, item.candidate.frame_index))
     return result
 
 
@@ -830,7 +872,7 @@ def output_path(output_dir: Path, item: SelectedFrame, image_format: str) -> Pat
         f"__frame-{item.candidate.frame_index:08d}"
         f"__{item.candidate.category}.{extension}"
     )
-    return output_dir / item.scan.split / filename
+    return output_dir / item.split / filename
 
 
 def write_selected_images(
@@ -873,7 +915,7 @@ def write_selected_images(
 
 def selected_row(item: SelectedFrame, path: Path, output_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "split": item.scan.split,
+        "split": item.split,
         "image": str(path.relative_to(output_dir)),
         "source_video": str(item.scan.path),
         "video_id": item.scan.video_id,
@@ -918,7 +960,7 @@ def write_outputs(
     validation_paths = [
         image_paths[(item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)]
         for item in selected
-        if item.scan.split == "validation"
+        if item.split == "validation"
     ]
     validation_paths = [path.resolve() for path in select_evenly_paths(validation_paths, args.validation_image_count)]
     (output_dir / "validation_images.txt").write_text(
@@ -928,7 +970,7 @@ def write_outputs(
 
     by_split: dict[str, list[SelectedFrame]] = {"train": [], "validation": []}
     for item in selected:
-        by_split[item.scan.split].append(item)
+        by_split[item.split].append(item)
     summary = {
         "source": str(args.source.expanduser().resolve()),
         "output_dir": str(output_dir),
@@ -939,6 +981,7 @@ def write_outputs(
                 else "first decoded frame of each video"
             ),
             "episodes_dir": str(args.episodes_dir.expanduser().resolve()) if args.episodes_dir else None,
+            "validation_unit": args.validation_unit,
             "difference_metric": args.difference_metric,
             "threshold": args.threshold,
             "pixel_threshold": args.pixel_threshold,
@@ -991,6 +1034,7 @@ def write_outputs(
                         "to_frame": episode.boundary.to_frame,
                         "from_timestamp": episode.boundary.from_timestamp,
                         "to_timestamp": episode.boundary.to_timestamp,
+                        "split": episode.split,
                         "evaluated_frames": len(episode.scores),
                         "selected_neutral": sum(
                             item.scan.video_id == scan.video_id
@@ -1039,7 +1083,7 @@ def print_statistics(scans: list[VideoScan], selected: list[SelectedFrame], dry_
         "validation": {"neutral": 0, "deformed": 0},
     }
     for item in selected:
-        counts[item.scan.split][item.candidate.category] += 1
+        counts[item.split][item.candidate.category] += 1
     prefix = "Dry run: " if dry_run else ""
     print(f"{prefix}videos={len(scans)} images={len(selected)}")
     for split in ("train", "validation"):
@@ -1071,6 +1115,7 @@ def main() -> None:
     scans: list[VideoScan] = []
     for path, split, video_id in tqdm(split_video_entries, desc="Scanning videos"):
         scans.append(scan_video(path, split, video_id, args, episode_records, dataset_root))
+    split_episodes(scans, args)
 
     selected: list[SelectedFrame] = []
     for scan in scans:

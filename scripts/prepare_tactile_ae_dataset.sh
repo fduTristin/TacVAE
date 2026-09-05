@@ -25,10 +25,12 @@ if [[ "${VIDEO_CHUNK}" == "all" && "${VIDEO_FILE}" == "all" ]]; then
   SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}"
   OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_full"
   VALIDATION_RATIO="0.1"
+  VALIDATION_UNIT="video"
 elif [[ "${VIDEO_CHUNK}" != "all" && "${VIDEO_FILE}" != "all" ]]; then
   SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}/chunk-${VIDEO_CHUNK}/file-${VIDEO_FILE}.mp4"
   OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_file${VIDEO_FILE}"
-  VALIDATION_RATIO="0"
+  VALIDATION_RATIO="0.1"
+  VALIDATION_UNIT="episode"
 else
   printf '%s\n' 'VIDEO_CHUNK and VIDEO_FILE must both be all or both identify one file' >&2
   exit 1
@@ -37,7 +39,7 @@ fi
 THRESHOLD="0.015"
 FRAME_STRIDE="2"
 MIN_DEFORMED_GAP="15"
-NEUTRAL_RATIO="0.25"
+NEUTRAL_RATIO="0.05"
 OUTPUT_RESOLUTION="224"
 RESIZE_MODE="letterbox"
 IMAGE_FORMAT="jpeg"
@@ -53,10 +55,10 @@ exec python "${PROJECT_ROOT}/data/utils/extract_tactile_video_frames.py" \
   --min-deformed-gap "${MIN_DEFORMED_GAP}" \
   --neutral-ratio "${NEUTRAL_RATIO}" \
   --validation-ratio "${VALIDATION_RATIO}" \
+  --validation-unit "${VALIDATION_UNIT}" \
   --output-resolution "${OUTPUT_RESOLUTION}" \
   --resize-mode "${RESIZE_MODE}" \
   --image-format "${IMAGE_FORMAT}" \
   --jpeg-quality "${JPEG_QUALITY}" \
-  --validation-image-count "${VALIDATION_IMAGE_COUNT}" \
   --overwrite \
   "$@"
