@@ -27,6 +27,21 @@
 
 `--sample-count` 是 `--max-images` 的别名。完整处理时不要设置 `--max-images` 或 `--max-frames-per-video`。
 
+处理该触觉视频目录下的全部视频时，把脚本顶部配置改为：
+
+```bash
+VIDEO_CHUNK="all"
+VIDEO_FILE="all"
+```
+
+此时脚本会递归处理 `VIDEO_KEY` 下的全部视频，自动使用 `validation-ratio=0.1`，并输出到：
+
+```text
+/home/xhz/TacVAE/data/tactile_ae_dataset_full
+```
+
+`VIDEO_CHUNK` 和 `VIDEO_FILE` 必须同时设为 `all`；不能只设置其中一个。全量处理时不要设置 `--max-videos`、`--max-images` 或 `--max-frames-per-video`。
+
 直接调用 Python 脚本时，不指定 `--source` 会使用题目中给出的
 `observation.images.left_wrist_left_tactile` 目录；使用 bash 包装脚本时，则以脚本顶部的 `SOURCE` 和 `OUTPUT_DIR` 配置为准。
 

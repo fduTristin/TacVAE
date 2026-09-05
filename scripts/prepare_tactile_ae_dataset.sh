@@ -17,16 +17,27 @@ DATASET_ROOT="/home/xhz/OpenNeoData/aloha"
 VIDEO_KEY="observation.images.left_wrist_left_tactile"
 VIDEO_CHUNK="000"
 VIDEO_FILE="138"
+# Set both values to "all" to process every video in VIDEO_KEY.
 
-SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}/chunk-${VIDEO_CHUNK}/file-${VIDEO_FILE}.mp4"
 EPISODES_DIR="${DATASET_ROOT}/meta/episodes"
-OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_file${VIDEO_FILE}"
+
+if [[ "${VIDEO_CHUNK}" == "all" && "${VIDEO_FILE}" == "all" ]]; then
+  SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}"
+  OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_full"
+  VALIDATION_RATIO="0.1"
+elif [[ "${VIDEO_CHUNK}" != "all" && "${VIDEO_FILE}" != "all" ]]; then
+  SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}/chunk-${VIDEO_CHUNK}/file-${VIDEO_FILE}.mp4"
+  OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_file${VIDEO_FILE}"
+  VALIDATION_RATIO="0"
+else
+  printf '%s\n' 'VIDEO_CHUNK and VIDEO_FILE must both be all or both identify one file' >&2
+  exit 1
+fi
 
 THRESHOLD="0.015"
 FRAME_STRIDE="2"
 MIN_DEFORMED_GAP="15"
 NEUTRAL_RATIO="0.25"
-VALIDATION_RATIO="0"
 OUTPUT_RESOLUTION="224"
 RESIZE_MODE="letterbox"
 IMAGE_FORMAT="jpeg"
