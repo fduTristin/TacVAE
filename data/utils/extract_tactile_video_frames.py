@@ -273,8 +273,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--validation-image-count",
         type=int,
-        default=8,
-        help="Number of validation paths written to validation_images.txt. Default: 8.",
+        default=None,
+        help="Legacy total validation path count. Use category-specific counts for new datasets.",
+    )
+    parser.add_argument(
+        "--validation-neutral-count",
+        type=int,
+        default=None,
+        help="Number of neutral validation paths written to validation_images.txt. Default: 5.",
+    )
+    parser.add_argument(
+        "--validation-deformed-count",
+        type=int,
+        default=None,
+        help="Number of deformed validation paths written to validation_images.txt. Default: 15.",
     )
     parser.add_argument(
         "--overwrite",
@@ -286,7 +298,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Scan and print selection statistics without writing images.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    category_counts = (args.validation_neutral_count, args.validation_deformed_count)
+    if args.validation_image_count is not None and any(count is not None for count in category_counts):
+        raise ValueError("Use either --validation-image-count or category-specific validation counts, not both")
+    if args.validation_image_count is None and all(count is None for count in category_counts):
+        args.validation_neutral_count = 5
+        args.validation_deformed_count = 15
+    elif args.validation_image_count is None:
+        args.validation_neutral_count = args.validation_neutral_count or 0
+        args.validation_deformed_count = args.validation_deformed_count or 0
+    return args
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -316,8 +338,13 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--output-resolution must be positive and divisible by 8")
     if not 1 <= args.jpeg_quality <= 100:
         raise ValueError("--jpeg-quality must be between 1 and 100")
-    if args.validation_image_count < 0:
+    if args.validation_image_count is not None and args.validation_image_count < 0:
         raise ValueError("--validation-image-count must be non-negative")
+    if any(
+        count is not None and count < 0
+        for count in (args.validation_neutral_count, args.validation_deformed_count)
+    ):
+        raise ValueError("Validation category counts must be non-negative")
 
     x0, y0, x1, y1 = args.roi
     if not all(0.0 <= value <= 1.0 for value in args.roi):
@@ -933,6 +960,42 @@ def selected_row(item: SelectedFrame, path: Path, output_dir: Path, args: argpar
     }
 
 
+def select_validation_paths(
+    selected: list[SelectedFrame],
+    image_paths: dict[tuple[str, int, int], Path],
+    args: argparse.Namespace,
+) -> list[Path]:
+    validation_items = [item for item in selected if item.split == "validation"]
+    if args.validation_image_count is not None:
+        chosen = select_evenly_paths(
+            [
+                image_paths[(item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)]
+                for item in validation_items
+            ],
+            args.validation_image_count,
+        )
+    else:
+        neutral = [item for item in validation_items if item.candidate.category == "neutral"]
+        deformed = [item for item in validation_items if item.candidate.category == "deformed"]
+        chosen = [
+            *select_evenly_paths(
+                [
+                    image_paths[(item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)]
+                    for item in neutral
+                ],
+                args.validation_neutral_count,
+            ),
+            *select_evenly_paths(
+                [
+                    image_paths[(item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)]
+                    for item in deformed
+                ],
+                args.validation_deformed_count,
+            ),
+        ]
+    return [path.resolve() for path in chosen]
+
+
 def write_outputs(
     selected: list[SelectedFrame],
     scans: list[VideoScan],
@@ -957,12 +1020,7 @@ def write_outputs(
         for row in rows:
             manifest.write(json.dumps(row, ensure_ascii=True) + "\n")
 
-    validation_paths = [
-        image_paths[(item.scan.video_id, item.candidate.episode_index, item.candidate.frame_index)]
-        for item in selected
-        if item.split == "validation"
-    ]
-    validation_paths = [path.resolve() for path in select_evenly_paths(validation_paths, args.validation_image_count)]
+    validation_paths = select_validation_paths(selected, image_paths, args)
     (output_dir / "validation_images.txt").write_text(
         "\n".join(str(path) for path in validation_paths) + ("\n" if validation_paths else ""),
         encoding="utf-8",
@@ -982,6 +1040,9 @@ def write_outputs(
             ),
             "episodes_dir": str(args.episodes_dir.expanduser().resolve()) if args.episodes_dir else None,
             "validation_unit": args.validation_unit,
+            "validation_image_count": args.validation_image_count,
+            "validation_neutral_count": args.validation_neutral_count,
+            "validation_deformed_count": args.validation_deformed_count,
             "difference_metric": args.difference_metric,
             "threshold": args.threshold,
             "pixel_threshold": args.pixel_threshold,

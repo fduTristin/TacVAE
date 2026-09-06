@@ -15,8 +15,8 @@ conda activate tacvae
 # Edit these values for another video or another dataset split.
 DATASET_ROOT="/home/xhz/OpenNeoData/aloha"
 VIDEO_KEY="observation.images.left_wrist_left_tactile"
-VIDEO_CHUNK="000"
-VIDEO_FILE="138"
+VIDEO_CHUNK="all"
+VIDEO_FILE="all"
 # Set both values to "all" to process every video in VIDEO_KEY.
 
 EPISODES_DIR="${DATASET_ROOT}/meta/episodes"
@@ -25,7 +25,7 @@ if [[ "${VIDEO_CHUNK}" == "all" && "${VIDEO_FILE}" == "all" ]]; then
   SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}"
   OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_full"
   VALIDATION_RATIO="0.1"
-  VALIDATION_UNIT="video"
+  VALIDATION_UNIT="episode"
 elif [[ "${VIDEO_CHUNK}" != "all" && "${VIDEO_FILE}" != "all" ]]; then
   SOURCE="${DATASET_ROOT}/videos/${VIDEO_KEY}/chunk-${VIDEO_CHUNK}/file-${VIDEO_FILE}.mp4"
   OUTPUT_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_file${VIDEO_FILE}"
@@ -36,15 +36,16 @@ else
   exit 1
 fi
 
-THRESHOLD="0.015"
+THRESHOLD="0.01"
 FRAME_STRIDE="2"
-MIN_DEFORMED_GAP="15"
+MIN_DEFORMED_GAP="1"
 NEUTRAL_RATIO="0.05"
 OUTPUT_RESOLUTION="224"
 RESIZE_MODE="letterbox"
 IMAGE_FORMAT="jpeg"
 JPEG_QUALITY="95"
-VALIDATION_IMAGE_COUNT="0"
+VALIDATION_NEUTRAL_COUNT="5"
+VALIDATION_DEFORMED_COUNT="15"
 
 exec python "${PROJECT_ROOT}/data/utils/extract_tactile_video_frames.py" \
   --source "${SOURCE}" \
@@ -60,5 +61,7 @@ exec python "${PROJECT_ROOT}/data/utils/extract_tactile_video_frames.py" \
   --resize-mode "${RESIZE_MODE}" \
   --image-format "${IMAGE_FORMAT}" \
   --jpeg-quality "${JPEG_QUALITY}" \
+  --validation-neutral-count "${VALIDATION_NEUTRAL_COUNT}" \
+  --validation-deformed-count "${VALIDATION_DEFORMED_COUNT}" \
   --overwrite \
   "$@"

@@ -42,7 +42,7 @@ VIDEO_FILE="all"
 /home/xhz/TacVAE/data/tactile_ae_dataset_full
 ```
 
-全量模式仍按完整视频划分 train/validation，避免相邻 episode 或帧造成跨 split 泄漏。
+全量模式的划分方式由脚本中的 `VALIDATION_UNIT` 决定；默认仓库配置按完整视频划分，若改成 `episode`，则会在每个视频内部按完整 episode 划分。
 
 `VIDEO_CHUNK` 和 `VIDEO_FILE` 必须同时设为 `all`；不能只设置其中一个。全量处理时不要设置 `--max-videos`、`--max-images` 或 `--max-frames-per-video`。
 
@@ -120,6 +120,8 @@ data/tactile_ae_dataset/
 - 差异分数和使用的阈值
 - 原始图像尺寸及输出尺寸
 
+`validation_images.txt` 默认从 validation split 均匀选择 5 张 neutral 和 15 张 deformed 图片，用于训练期间在 WandB 中比较固定样本的重建效果。这里只写已有图片的路径，不会复制图片。
+
 `summary.json` 包含每个视频和 episode 的分数分布、解码帧数、参考帧和最终选择数量。调阈值时重点观察 `score_quantiles`：如果大量静态视频的 `p95` 已经接近阈值，应该提高阈值；如果明显形变的最大分数仍低于阈值，应该降低阈值或缩小 ROI。
 
 ## 常用参数
@@ -141,6 +143,9 @@ data/tactile_ae_dataset/
 | `--max-neutral-per-video` | `0` | 单视频无形变样本上限 |
 | `--validation-ratio` | `0.1` | 按 `--validation-unit` 切分验证集 |
 | `--validation-unit` | `video` | `video` 按视频切分，`episode` 按每个视频内的 episode 切分 |
+| `--validation-neutral-count` | `5` | 写入 `validation_images.txt` 的 neutral 图片数量 |
+| `--validation-deformed-count` | `15` | 写入 `validation_images.txt` 的 deformed 图片数量 |
+| `--validation-image-count` | 未设置 | 兼容旧用法：不区分类别地选择总图片数，不能和上述两个参数同时使用 |
 | `--output-resolution` | `512` | 输出方形图片边长，必须被 8 整除 |
 | `--resize-mode` | `letterbox` | `letterbox` 保留完整视野，避免中心裁剪硅胶区域 |
 | `--image-format` | `png` | `png` 或 `jpeg` |
