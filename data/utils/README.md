@@ -11,13 +11,13 @@
 ./scripts/prepare_tactile_ae_dataset.sh
 ```
 
-当前脚本顶部内置了一个可直接修改的配置，默认完整处理 `file-138.mp4`，并输出到：
+当前脚本顶部内置了一个可直接修改的配置，默认完整处理 `VIDEO_KEY` 下的全部视频，并直接输出为 `256x144` JPEG 图片到：
 
 ```text
-/home/xhz/TacVAE/data/tactile_ae_dataset_file138
+/home/xhz/TacVAE/data/tactile_ae_dataset_256x144zhiying
 ```
 
-单文件模式默认使用 `validation_ratio=0.1`，并按 episode 划分 train/validation；同一个 episode 的帧不会同时出现在两个 split 中。
+抽帧完成后，脚本还会自动生成 `train_event_indexzhiying.txt` 和对应的统计文件；训练时可以直接使用这个索引减少连续形变帧的重复。单文件模式默认使用 `validation_ratio=0.1`，并按 episode 划分 train/validation；同一个 episode 的帧不会同时出现在两个 split 中。
 
 需要处理其他文件时，直接修改 `scripts/prepare_tactile_ae_dataset.sh` 顶部的 `VIDEO_CHUNK`、`VIDEO_FILE` 和参数变量。脚本末尾也会追加命令行参数，因此可以临时覆盖配置；例如只做局部 smoke test：
 
@@ -39,10 +39,10 @@ VIDEO_FILE="all"
 此时脚本会递归处理 `VIDEO_KEY` 下的全部视频，自动使用 `validation-ratio=0.1`，并输出到：
 
 ```text
-/home/xhz/TacVAE/data/tactile_ae_dataset_full
+/home/xhz/TacVAE/data/tactile_ae_dataset_256x144zhiying
 ```
 
-全量模式的划分方式由脚本中的 `VALIDATION_UNIT` 决定；默认仓库配置按完整视频划分，若改成 `episode`，则会在每个视频内部按完整 episode 划分。
+全量模式的划分方式由脚本中的 `VALIDATION_UNIT` 决定；当前默认配置按完整 episode 划分，同一个 episode 的帧不会同时进入 train 和 validation。
 
 `VIDEO_CHUNK` 和 `VIDEO_FILE` 必须同时设为 `all`；不能只设置其中一个。全量处理时不要设置 `--max-videos`、`--max-images` 或 `--max-frames-per-video`。
 
@@ -105,10 +105,13 @@ data/tactile_ae_dataset/
 │   └── ...
 ├── manifest.jsonl
 ├── summary.json
-└── validation_images.txt
+├── validation_images.txt
+├── train_event_indexzhiying.txt
+├── train_event_indexzhiying_summary.json
+└── EXPORT_COMPLETE.json
 ```
 
-`train` 和 `validation` 中都是扁平的 RGB 图片目录，因此可以直接作为 `imagefolder` 的 `--train_data_dir`。不需要 caption、类别标签或其他标注；manifest 只用于追溯来源，不参与训练。
+`train` 和 `validation` 中都是扁平的 RGB 图片目录，因此可以直接作为 `imagefolder` 的 `--train_data_dir`。包装脚本默认写入 `256x144` JPEG；直接调用 Python 脚本时仍可使用方形默认值，或通过 `--output-size` 指定矩形尺寸。不需要 caption、类别标签或其他标注；manifest 只用于追溯来源，不参与训练。
 
 `manifest.jsonl` 每行记录：
 
@@ -146,7 +149,8 @@ data/tactile_ae_dataset/
 | `--validation-neutral-count` | `5` | 写入 `validation_images.txt` 的 neutral 图片数量 |
 | `--validation-deformed-count` | `15` | 写入 `validation_images.txt` 的 deformed 图片数量 |
 | `--validation-image-count` | 未设置 | 兼容旧用法：不区分类别地选择总图片数，不能和上述两个参数同时使用 |
-| `--output-resolution` | `512` | 输出方形图片边长，必须被 8 整除 |
+| `--output-resolution` | `512` | 输出方形图片边长，必须被 8 整除；与 `--output-size` 二选一 |
+| `--output-size` | 未设置 | 输出 `宽 高`，两个尺寸必须被 8 整除；设置后优先于 `--output-resolution` |
 | `--resize-mode` | `letterbox` | `letterbox` 保留完整视野，避免中心裁剪硅胶区域 |
 | `--image-format` | `png` | `png` 或 `jpeg` |
 | `--dry-run` | 关闭 | 只扫描并打印统计，不写图片 |
@@ -158,7 +162,7 @@ data/tactile_ae_dataset/
   --max-videos 2 \
   --max-frames-per-video 3000 \
   --max-images 100 \
-  --output-resolution 128 \
+  --output-size 128 128 \
   --threshold 0.015 \
   --overwrite
 ```
@@ -183,16 +187,16 @@ data/tactile_ae_dataset/
   --min-deformed-gap 15 \
   --neutral-ratio 0.25 \
   --validation-ratio 0.1 \
-  --output-resolution 512 \
+  --output-size 512 512 \
   --image-format png \
   --overwrite
 ```
 
 ## 用于 AutoencoderKL 训练
 
-转换器默认输出 `512x512` 方形 RGB 图片，且 `letterbox` 保留原始 `640x360` 触觉画面的完整内容。这和示例训练脚本的默认 `--resolution 512` 一致，可以避免示例脚本的 `CenterCrop` 再次截掉左右区域。对于包含多个 episode 的视频，参考帧由 `meta/episodes` 中对应 episode 的起始帧确定。
+直接调用转换器时默认输出 `512x512` 方形 RGB 图片；bash 包装脚本则配置为直接输出 `256x144`，`letterbox` 在原始 `640x360` 比例下不会产生额外裁剪或填充。对于包含多个 episode 的视频，参考帧由 `meta/episodes` 中对应 episode 的起始帧确定。
 
-当前正式训练配置已经集中在 `scripts/train_tactile_autoencoderkl.sh`。全量 `224x224` 数据集生成完成后，直接执行：
+当前正式训练配置已经集中在 `scripts/train_tactile_autoencoderkl.sh`。全量 `256x144` 数据集和 event index 生成完成后，直接执行：
 
 ```bash
 ./scripts/train_tactile_autoencoderkl.sh
@@ -201,13 +205,14 @@ data/tactile_ae_dataset/
 脚本默认使用：
 
 ```text
-dataset: data/tactile_ae_dataset_full
-GPU: 5
-per-device batch size: 64
-max train steps: 30000
-perceptual scale: 0.05
+dataset: data/tactile_ae_dataset_256x144zhiying
+GPU: configured by `GPU_IDS` and `NUM_PROCESSES` in the training script
+per-device batch size: 8
+max train steps: 100000
+KL scale: 1.0416666667e-5 on per-latent mean KL, warmed up over 5000 steps
+perceptual scale: 0.0
 GAN: disabled until step 1000000000
-output: outputs/tactile-aekl-formal-bs64
+output: outputs/zhiying-scratch-256x144-eventindex
 ```
 
 需要调整 GPU、batch size、训练步数或 loss 权重时，直接编辑该脚本顶部的配置变量。也可以临时追加训练参数覆盖脚本默认值，例如：
@@ -218,12 +223,12 @@ output: outputs/tactile-aekl-formal-bs64
   --output_dir /mnt/sdc/xhz/TacVAE/outputs/tactile-aekl-smoke-full
 ```
 
-训练脚本会先检查 `train/`、`validation_images.txt` 和所有验证图片是否存在，再启动 `accelerate`。不要在正式训练命令中添加 `--scale_lr`，除非你明确希望根据 batch size 和 GPU 数量放大学习率。
+训练脚本会先检查 `train/`、`validation_images.txt` 和所有验证图片是否存在，再启动 `accelerate`。`kl_loss` 现在是 FP32 计算的 per-latent mean，`kl_sum` 仅作为原始总量诊断；训练日志还会记录 `weighted_kl_loss`、原始及 scaling-factor 校正后的 `latent_mean/latent_std`、`posterior_mean_abs` 和 `posterior_std`，用于判断 encoder 的分布是否在改善。不要在正式训练命令中添加 `--scale_lr`，除非你明确希望根据 batch size 和 GPU 数量放大学习率。
 
 先读取脚本生成的验证图片列表：
 
 ```bash
-mapfile -t VALIDATION_IMAGES < data/tactile_ae_dataset/validation_images.txt
+mapfile -t VALIDATION_IMAGES < data/tactile_ae_dataset_256x144zhiying/validation_images.txt
 ```
 
 然后从 `examples/research_projects/autoencoderkl` 目录启动训练：
@@ -232,10 +237,11 @@ mapfile -t VALIDATION_IMAGES < data/tactile_ae_dataset/validation_images.txt
 cd diffusers/examples/research_projects/autoencoderkl
 accelerate launch train_autoencoderkl.py \
   --pretrained_model_name_or_path stabilityai/sd-vae-ft-mse \
-  --train_data_dir /home/xhz/TacVAE/data/tactile_ae_dataset/train \
+  --train_data_dir /home/xhz/TacVAE/data/tactile_ae_dataset_256x144zhiying/train \
   --image_column image \
   --validation_image "${VALIDATION_IMAGES[@]}" \
-  --resolution 512 \
+  --image_width 256 \
+  --image_height 144 \
   --train_batch_size 4 \
   --num_train_epochs 100 \
   --learning_rate 4.5e-6 \
@@ -243,7 +249,7 @@ accelerate launch train_autoencoderkl.py \
   --output_dir /home/xhz/TacVAE/outputs/tactile-aekl
 ```
 
-如果选择了其他 `--output-resolution`，训练时要把 `--resolution` 改成相同的值。训练代码只读取图片列，不使用 `neutral/deformed` 字符串作为标签；这些类别主要用于检查数据比例。
+如果选择了其他 `--output-size`，训练时要把 `--image_width` 和 `--image_height` 改成相同的值。训练代码只读取图片列，不使用 `neutral/deformed` 字符串作为标签；这些类别主要用于检查数据比例。
 
 默认验证集按视频划分，而不是按帧随机划分。同一个视频的帧不会同时进入 train 和 validation，可以减少相邻视频帧造成的验证指标虚高。需要在单个视频内建立验证集时，使用 `--validation-unit episode`；此时按完整 episode 划分，同一个 episode 的帧不会同时进入 train 和 validation，而每个 episode 的参考帧和形变判断仍然独立进行。
 

@@ -16,6 +16,7 @@ import math
 import random
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -250,7 +251,18 @@ def parse_args() -> argparse.Namespace:
         "--output-resolution",
         type=int,
         default=512,
-        help="Square output image resolution. Default: 512.",
+        help="Square output image resolution. Ignored when --output-size is set. Default: 512.",
+    )
+    parser.add_argument(
+        "--output-size",
+        type=int,
+        nargs=2,
+        metavar=("WIDTH", "HEIGHT"),
+        default=None,
+        help=(
+            "Output image width and height. Both dimensions must be divisible by 8. "
+            "When omitted, --output-resolution is used for a square output."
+        ),
     )
     parser.add_argument(
         "--resize-mode",
@@ -299,6 +311,11 @@ def parse_args() -> argparse.Namespace:
         help="Scan and print selection statistics without writing images.",
     )
     args = parser.parse_args()
+    if args.output_size is None:
+        args.output_width = args.output_resolution
+        args.output_height = args.output_resolution
+    else:
+        args.output_width, args.output_height = args.output_size
     category_counts = (args.validation_neutral_count, args.validation_deformed_count)
     if args.validation_image_count is not None and any(count is not None for count in category_counts):
         raise ValueError("Use either --validation-image-count or category-specific validation counts, not both")
@@ -334,8 +351,13 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Per-video sample caps must be non-negative")
     if not 0.0 <= args.validation_ratio < 1.0:
         raise ValueError("--validation-ratio must be between 0 and 1")
-    if args.output_resolution <= 0 or args.output_resolution % 8 != 0:
-        raise ValueError("--output-resolution must be positive and divisible by 8")
+    if (
+        args.output_width <= 0
+        or args.output_height <= 0
+        or args.output_width % 8 != 0
+        or args.output_height % 8 != 0
+    ):
+        raise ValueError("Output width and height must be positive and divisible by 8")
     if not 1 <= args.jpeg_quality <= 100:
         raise ValueError("--jpeg-quality must be between 1 and 100")
     if args.validation_image_count is not None and args.validation_image_count < 0:
@@ -872,21 +894,22 @@ def select_global_cap(
     return result
 
 
-def transform_image(image: Image.Image, resolution: int, mode: str) -> Image.Image:
+def transform_image(image: Image.Image, output_size: tuple[int, int], mode: str) -> Image.Image:
     image = image.convert("RGB")
+    output_width, output_height = output_size
     if mode == "letterbox":
-        scale = min(resolution / image.width, resolution / image.height)
+        scale = min(output_width / image.width, output_height / image.height)
         size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
         resized = image.resize(size, Image.Resampling.BICUBIC)
-        canvas = Image.new("RGB", (resolution, resolution), (0, 0, 0))
-        offset = ((resolution - resized.width) // 2, (resolution - resized.height) // 2)
+        canvas = Image.new("RGB", output_size, (0, 0, 0))
+        offset = ((output_width - resized.width) // 2, (output_height - resized.height) // 2)
         canvas.paste(resized, offset)
         return canvas
     if mode == "stretch":
-        return image.resize((resolution, resolution), Image.Resampling.BICUBIC)
+        return image.resize(output_size, Image.Resampling.BICUBIC)
     return ImageOps.fit(
         image,
-        (resolution, resolution),
+        output_size,
         method=Image.Resampling.BICUBIC,
         centering=(0.5, 0.5),
     )
@@ -924,7 +947,11 @@ def write_selected_images(
                 if item is None:
                     continue
                 image = Image.fromarray(frame.to_rgb().to_ndarray())
-                image = transform_image(image, args.output_resolution, args.resize_mode)
+                image = transform_image(
+                    image,
+                    (args.output_width, args.output_height),
+                    args.resize_mode,
+                )
                 path = output_path(output_dir, item, args.image_format)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if args.image_format == "jpeg":
@@ -956,7 +983,7 @@ def selected_row(item: SelectedFrame, path: Path, output_dir: Path, args: argpar
         "reference_frame_index": item.candidate.reference_frame_index,
         "source_width": item.scan.width,
         "source_height": item.scan.height,
-        "output_resolution": args.output_resolution,
+        "output_resolution": [args.output_width, args.output_height],
     }
 
 
@@ -1057,7 +1084,7 @@ def write_outputs(
             "max_neutral_per_video": args.max_neutral_per_video,
         },
         "output": {
-            "resolution": [args.output_resolution, args.output_resolution],
+            "resolution": [args.output_width, args.output_height],
             "resize_mode": args.resize_mode,
             "image_format": args.image_format,
         },
@@ -1126,6 +1153,21 @@ def write_outputs(
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
+    )
+    (output_dir / "EXPORT_COMPLETE.json").write_text(
+        json.dumps(
+            {
+                "counts": {
+                    split: len(items) for split, items in by_split.items()
+                },
+                "videos": len(scans),
+                "completed_at": time.time(),
+            },
+            ensure_ascii=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
