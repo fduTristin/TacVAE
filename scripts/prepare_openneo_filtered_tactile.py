@@ -158,7 +158,7 @@ def extraction_options() -> SimpleNamespace:
         difference_metric="mean_abs",
         pixel_threshold=0.08,
         metric_width=160,
-        roi=(0.0, 0.0, 1.0, 1.0),
+        roi=[0.0, 0.0, 1.0, 1.0],
         frame_stride=2,
         min_deformed_gap=1,
         neutral_ratio=0.05,
