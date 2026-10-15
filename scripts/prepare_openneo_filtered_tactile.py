@@ -13,6 +13,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import as_completed
 from dataclasses import dataclass
+from functools import partial
 import hashlib
 import json
 import math
@@ -183,6 +184,22 @@ def source_identity(job: VideoJob) -> dict:
     return {"path": str(job.path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
+def source_layout_output_path(
+    job: VideoJob, output_dir: Path, item: extractor.SelectedFrame, image_format: str
+) -> Path:
+    """Mirror the source robot/video tree and bound each folder by episode."""
+    video_dir = job.path.relative_to(job.dataset_root).with_suffix("")
+    extension = "jpg" if image_format == "jpeg" else "png"
+    return (
+        output_dir
+        / item.split
+        / job.robot
+        / video_dir
+        / f"episode-{item.candidate.episode_index:06d}"
+        / f"frame-{item.candidate.frame_index:08d}__{item.candidate.category}.{extension}"
+    )
+
+
 def is_completed(output_dir: Path, job: VideoJob) -> bool:
     records_path, done_path = record_paths(output_dir, job)
     if not done_path.is_file() or not records_path.is_file():
@@ -229,7 +246,13 @@ def process_job(job: VideoJob, output_dir: Path, options: SimpleNamespace) -> tu
     chosen.sort(key=lambda item: item.candidate.frame_index)
     if not chosen:
         raise RuntimeError(f"No images selected from {job.path}")
-    images = extractor.write_selected_images(chosen, output_dir, options, show_progress=False)
+    images = extractor.write_selected_images(
+        chosen,
+        output_dir,
+        options,
+        show_progress=False,
+        path_for_item=partial(source_layout_output_path, job),
+    )
     records_path, done_path = record_paths(output_dir, job)
     temporary = records_path.with_suffix(records_path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
@@ -271,7 +294,7 @@ def finalize(output_dir: Path, jobs: list[VideoJob], config: dict, selection_sum
                 manifest.write(line)
                 counts[row["split"]][row["category"]] += 1
                 if row["split"] == "train":
-                    index.write(image.name + "\n")
+                    index.write(Path(row["image"]).relative_to("train").as_posix() + "\n")
                 else:
                     validation[row["category"]].append(image)
     chosen_validation = [
@@ -295,7 +318,12 @@ def finalize(output_dir: Path, jobs: list[VideoJob], config: dict, selection_sum
             "sampling": "event onset, peak, offset, periodic anchors, and episode-balanced neutral samples",
             **vars(extraction_options()),
         },
-        "output": {"resolution": [256, 144], "resize_mode": "letterbox", "image_format": "jpeg"},
+        "output": {
+            "resolution": [256, 144],
+            "resize_mode": "letterbox",
+            "image_format": "jpeg",
+            "layout": "split/robot/videos/camera/chunk/file/episode/frame",
+        },
         "video_count": len(jobs),
         "episode_count": sum(len(job.selected_episodes) for job in jobs),
         "unique_episode_count": sum(item["exported_episodes"] for item in selection_summary.values()),
@@ -338,7 +366,7 @@ def main() -> None:
         item["exported_episodes"] = len({episode for job in robot_jobs for episode in job.selected_episodes})
         item["exported_videos"] = len(robot_jobs)
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
         "manifest": str(manifest_path),
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         "dataset_root": str(dataset_root),

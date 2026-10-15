@@ -16,6 +16,8 @@ python scripts/prepare_openneo_filtered_tactile.py \
 
 先加 `--dry-run` 可核对 episode 和视频文件数量，不写图片。输出目录应与源数据分开；完成后包含 `train/`、`validation/`、`manifest.jsonl`、`train_event_indexzhiying.txt`、`validation_images.txt`、`summary.json` 和 `EXPORT_COMPLETE.json`，供 AutoencoderKL 训练入口使用。`--max-videos` 可在另一个输出目录做局部验证。
 
+新导出的图片沿原始数据集层级存放，例如 `train/aloha/videos/observation.images.left_wrist_left_tactile/chunk-000/file-000/episode-000123/frame-00000001__neutral.jpg`。每个 episode 单独成目录，避免把所有训练图片放在 `train/` 根目录。训练索引的每一行是相对于 `train/` 的图片路径；TacVAE 的索引数据读取器同时接受这种分层路径和旧版单层文件名。准备完成后，可用 `DATASET_DIR=/data/workspace/VTLA/tacvae_openneo_downstream_256x144 ./scripts/train_tactile_autoencoderkl.sh` 指向新数据集。训练输出目录和其它训练参数仍由该脚本配置。
+
 `extract_tactile_video_frames.py` 用于把触觉视频转换成可以被 Diffusers
 `train_autoencoderkl.py` 直接读取的图像目录。它针对硅胶指尖图像大部分时间不形变的特点，避免把大量重复的静态帧直接送进 AE 训练。对于 LeRobot 数据集，脚本会按 episode 重置参考帧，而不是把整个视频文件当成一个 episode。
 

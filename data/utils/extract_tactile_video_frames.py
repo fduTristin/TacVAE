@@ -17,6 +17,7 @@ import random
 import re
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -933,7 +934,12 @@ def output_path(output_dir: Path, item: SelectedFrame, image_format: str) -> Pat
 
 
 def write_selected_images(
-    selected: list[SelectedFrame], output_dir: Path, args: argparse.Namespace, *, show_progress: bool = True
+    selected: list[SelectedFrame],
+    output_dir: Path,
+    args: argparse.Namespace,
+    *,
+    show_progress: bool = True,
+    path_for_item: Callable[[Path, SelectedFrame, str], Path] = output_path,
 ) -> dict[tuple[str, int, int], Path]:
     by_video: dict[Path, list[SelectedFrame]] = {}
     for item in selected:
@@ -963,7 +969,7 @@ def write_selected_images(
                     (args.output_width, args.output_height),
                     args.resize_mode,
                 )
-                path = output_path(output_dir, item, args.image_format)
+                path = path_for_item(output_dir, item, args.image_format)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if args.image_format == "jpeg":
                     image.save(path, format="JPEG", quality=args.jpeg_quality, subsampling=0)
