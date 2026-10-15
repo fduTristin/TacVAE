@@ -618,6 +618,7 @@ def scan_video(
     args: argparse.Namespace,
     episode_records: dict[tuple[str, int, int], list[EpisodeRecord]] | None,
     dataset_root: Path | None,
+    episode_filter: set[int] | frozenset[int] | None = None,
 ) -> VideoScan:
     scores: list[float] = []
     decoded_frames = 0
@@ -653,7 +654,11 @@ def scan_video(
                 )
             ]
 
-        episode_scans = [EpisodeScan(boundary, split, [], [], []) for boundary in boundaries]
+        episode_scans = {
+            boundary.episode_index: EpisodeScan(boundary, split, [], [], [])
+            for boundary in boundaries
+            if episode_filter is None or boundary.episode_index in episode_filter
+        }
         episode_cursor = 0
         reference: np.ndarray | None = None
         last_deformed_frame = -args.min_deformed_gap - 1
@@ -676,12 +681,14 @@ def scan_video(
                 boundary.to_frame and frame_index >= boundary.to_frame
             ):
                 continue
+            if boundary.episode_index not in episode_scans:
+                continue
             is_episode_start = frame_index == boundary.from_frame
             if frame_index % args.frame_stride != 0 and not is_episode_start:
                 continue
 
             current = metric_gray(frame, args.metric_width, tuple(args.roi))
-            episode_scan = episode_scans[episode_cursor]
+            episode_scan = episode_scans[boundary.episode_index]
             if is_episode_start:
                 reference = current.copy()
                 score = 0.0
@@ -723,7 +730,7 @@ def scan_video(
                     )
                     last_deformed_frame = frame_index
 
-    if reference is None or not scores:
+    if not scores:
         raise RuntimeError(f"Could not decode an evaluable frame from {path}")
     if episode_records is not None and decoded_frames >= boundaries[-1].to_frame:
         if decoded_frames != boundaries[-1].to_frame:
@@ -741,7 +748,7 @@ def scan_video(
         fps=fps,
         decoded_frames=decoded_frames,
         evaluated_frames=len(scores),
-        episodes=episode_scans,
+        episodes=list(episode_scans.values()),
         score_min=score_min,
         score_max=score_max,
         score_mean=score_mean,
@@ -926,21 +933,25 @@ def output_path(output_dir: Path, item: SelectedFrame, image_format: str) -> Pat
 
 
 def write_selected_images(
-    selected: list[SelectedFrame], output_dir: Path, args: argparse.Namespace
+    selected: list[SelectedFrame], output_dir: Path, args: argparse.Namespace, *, show_progress: bool = True
 ) -> dict[tuple[str, int, int], Path]:
     by_video: dict[Path, list[SelectedFrame]] = {}
     for item in selected:
         by_video.setdefault(item.scan.path, []).append(item)
     written: dict[tuple[str, int, int], Path] = {}
 
-    for source, items in tqdm(sorted(by_video.items(), key=lambda pair: pair[0].as_posix()), desc="Writing images"):
+    sources = sorted(by_video.items(), key=lambda pair: pair[0].as_posix())
+    for source, items in tqdm(sources, desc="Writing images", disable=not show_progress):
         targets = {item.candidate.frame_index: item for item in items}
+        last_target = max(targets)
         with av.open(str(source)) as container:
             video_stream = next((stream for stream in container.streams if stream.type == "video"), None)
             if video_stream is None:
                 raise RuntimeError(f"No video stream found in {source}")
             video_stream.thread_type = "AUTO"
             for frame_index, frame in enumerate(container.decode(video=video_stream.index)):
+                if frame_index > last_target:
+                    break
                 if args.max_frames_per_video and frame_index >= args.max_frames_per_video:
                     break
                 item = targets.get(frame_index)

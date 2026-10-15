@@ -1,5 +1,21 @@
 # 触觉视频转 AutoencoderKL 图像数据集
 
+## OpenNeo 多本体任务筛选
+
+`scripts/prepare_openneo_filtered_tactile.py` 接受 OpenNeo 任务筛选 JSON，从所列本体的所有触觉相机中只选匹配任务的 episode。训练/验证按 `(本体, episode_index)` 统一划分，因此同一 episode 的不同相机不会跨 split。它沿用下文的 256×144 JPEG、参考帧差分和 event index 参数，但只写出最终训练索引选中的图片，避免先导出大量随后弃用的图片。每个视频单独记录完成状态；使用相同参数和输出目录重新运行即可继续。
+
+在含有 `av`、`Pillow`、`numpy`、`pyarrow`、`tqdm` 的 Python 环境中，从 TacVAE 根目录执行：
+
+```bash
+python scripts/prepare_openneo_filtered_tactile.py \
+  --manifest ../../assets/openneo_downstream_tasks.json \
+  --dataset-root ../../../OpenNeoData \
+  --output-dir /data/workspace/VTLA/tacvae_openneo_downstream_256x144 \
+  --workers 16
+```
+
+先加 `--dry-run` 可核对 episode 和视频文件数量，不写图片。输出目录应与源数据分开；完成后包含 `train/`、`validation/`、`manifest.jsonl`、`train_event_indexzhiying.txt`、`validation_images.txt`、`summary.json` 和 `EXPORT_COMPLETE.json`，供 AutoencoderKL 训练入口使用。`--max-videos` 可在另一个输出目录做局部验证。
+
 `extract_tactile_video_frames.py` 用于把触觉视频转换成可以被 Diffusers
 `train_autoencoderkl.py` 直接读取的图像目录。它针对硅胶指尖图像大部分时间不形变的特点，避免把大量重复的静态帧直接送进 AE 训练。对于 LeRobot 数据集，脚本会按 episode 重置参考帧，而不是把整个视频文件当成一个 episode。
 
