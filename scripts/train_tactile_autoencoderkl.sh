@@ -4,18 +4,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-if command -v conda >/dev/null 2>&1; then
-  CONDA_SETUP="$(conda info --base)/etc/profile.d/conda.sh"
-elif [[ -f "/home/xhz/miniconda3/etc/profile.d/conda.sh" ]]; then
-  # Detached tmux sessions do not necessarily inherit the interactive shell PATH.
-  CONDA_SETUP="/home/xhz/miniconda3/etc/profile.d/conda.sh"
+if [[ -n "${TACVAE_PYTHON:-}" ]]; then
+  if [[ ! -x "${TACVAE_PYTHON}" ]]; then
+    printf 'Python executable does not exist: %s\n' "${TACVAE_PYTHON}" >&2
+    exit 1
+  fi
+  PYTHON_COMMAND=("${TACVAE_PYTHON}")
+  ACCELERATE_COMMAND=("${TACVAE_PYTHON}" -m accelerate.commands.launch)
 else
-  printf '%s\n' "conda setup script was not found" >&2
-  exit 1
+  if command -v conda >/dev/null 2>&1; then
+    CONDA_SETUP="$(conda info --base)/etc/profile.d/conda.sh"
+  elif [[ -f "/home/xhz/miniconda3/etc/profile.d/conda.sh" ]]; then
+    # Detached tmux sessions do not necessarily inherit the interactive shell PATH.
+    CONDA_SETUP="/home/xhz/miniconda3/etc/profile.d/conda.sh"
+  else
+    printf '%s\n' "conda setup script was not found" >&2
+    exit 1
+  fi
+  source "${CONDA_SETUP}"
+  conda activate tacvae
+  PYTHON_COMMAND=(python)
+  ACCELERATE_COMMAND=(accelerate launch)
 fi
-
-source "${CONDA_SETUP}"
-conda activate tacvae
 
 # Edit these values for another dataset, GPU, or experiment.
 DATASET_DIR="${DATASET_DIR:-${PROJECT_ROOT}/data/tactile_ae_dataset_256x144zhiying}"
@@ -23,19 +33,19 @@ TRAIN_DATA_DIR="${DATASET_DIR}/train"
 VALIDATION_IMAGES_FILE="${DATASET_DIR}/validation_images.txt"
 SUMMARY_FILE="${DATASET_DIR}/summary.json"
 TRAIN_INDEX_FILE="${DATASET_DIR}/train_event_indexzhiying.txt"
-OUTPUT_DIR="${PROJECT_ROOT}/outputs/zhiying-scratch-256x144-eventindex"
+OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/outputs/zhiying-scratch-256x144-eventindex}"
 
 MODEL_CONFIG="${PROJECT_ROOT}/scripts/autoencoderkl_config.json"
-GPU_IDS="0,1,2,3"
-NUM_PROCESSES="4"
-MAIN_PROCESS_PORT="29618"
+GPU_IDS="${GPU_IDS:-0,1,2,3}"
+NUM_PROCESSES="${NUM_PROCESSES:-4}"
+MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29618}"
 
 IMAGE_WIDTH="256"
 IMAGE_HEIGHT="144"
-TRAIN_BATCH_SIZE="8"
-DATALOADER_NUM_WORKERS="4"
-MAX_TRAIN_STEPS="100000"
-GRADIENT_ACCUMULATION_STEPS="2"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
+DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
+MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-100000}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 LEARNING_RATE="1e-4"
 DISC_LEARNING_RATE="1e-6"
 LR_SCHEDULER="constant_with_warmup"
@@ -49,14 +59,15 @@ PERCEPTUAL_SCALE="0.0"
 DISC_START="1000000000"
 DISC_FACTOR="1.0"
 
-VALIDATION_STEPS="1000"
-CHECKPOINTING_STEPS="5000"
-CHECKPOINTS_TOTAL_LIMIT="4"
+VALIDATION_STEPS="${VALIDATION_STEPS:-1000}"
+CHECKPOINTING_STEPS="${CHECKPOINTING_STEPS:-5000}"
+CHECKPOINTS_TOTAL_LIMIT="${CHECKPOINTS_TOTAL_LIMIT:-4}"
 
-WANDB_DIR="${PROJECT_ROOT}/wandb"
-WANDB_PROJECT="tactile-aekl-formal"
-WANDB_RUN_GROUP="tactile-aekl-formal"
-WANDB_NAME="tactile-aekl-scratch-256x144-eventindex-resume100k-bs8"
+WANDB_DIR="${WANDB_DIR:-${PROJECT_ROOT}/wandb}"
+WANDB_PROJECT="${WANDB_PROJECT:-tactile-aekl-formal}"
+WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-tactile-aekl-formal}"
+WANDB_NAME="${WANDB_NAME:-tactile-aekl-scratch-256x144-eventindex-resume100k-bs8}"
+REPORT_TO="${REPORT_TO:-wandb}"
 
 if [[ ! -f "${DATASET_DIR}/EXPORT_COMPLETE.json" ]]; then
   printf 'Export is not complete: %s\n' "${DATASET_DIR}" >&2
@@ -82,7 +93,7 @@ if [[ ! -f "${SUMMARY_FILE}" ]]; then
   exit 1
 fi
 
-if ! python - "${SUMMARY_FILE}" <<'PY'
+if ! "${PYTHON_COMMAND[@]}" - "${SUMMARY_FILE}" <<'PY'
 import json
 import sys
 
@@ -130,9 +141,18 @@ export WANDB_PROJECT
 export WANDB_RUN_GROUP
 export WANDB_NAME
 
-exec accelerate launch \
+mkdir -p "${OUTPUT_DIR}" "${WANDB_DIR}"
+
+ACCELERATE_DISTRIBUTED_ARGS=()
+if (( NUM_PROCESSES > 1 )); then
+  ACCELERATE_DISTRIBUTED_ARGS=(--multi_gpu)
+fi
+
+exec "${ACCELERATE_COMMAND[@]}" \
+  "${ACCELERATE_DISTRIBUTED_ARGS[@]}" \
   --num_processes "${NUM_PROCESSES}" \
   --main_process_port "${MAIN_PROCESS_PORT}" \
+  --mixed_precision bf16 \
   "${PROJECT_ROOT}/diffusers/examples/research_projects/autoencoderkl/train_autoencoderkl.py" \
   --model_config_name_or_path "${MODEL_CONFIG}" \
   --train_data_dir "${TRAIN_DATA_DIR}" \
@@ -161,7 +181,7 @@ exec accelerate launch \
   --checkpoints_total_limit "${CHECKPOINTS_TOTAL_LIMIT}" \
   --output_dir "${OUTPUT_DIR}" \
   "${RESUME_ARGS[@]}" \
-  --report_to wandb \
+  --report_to "${REPORT_TO}" \
   --tracker_project_name "${WANDB_PROJECT}" \
   --mixed_precision bf16 \
   --gradient_checkpointing \
