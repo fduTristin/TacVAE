@@ -18,7 +18,7 @@ source "${CONDA_SETUP}"
 conda activate tacvae
 
 # Edit these values for another dataset, GPU, or experiment.
-DATASET_DIR="${PROJECT_ROOT}/data/tactile_ae_dataset_256x144zhiying"
+DATASET_DIR="${DATASET_DIR:-${PROJECT_ROOT}/data/tactile_ae_dataset_256x144zhiying}"
 TRAIN_DATA_DIR="${DATASET_DIR}/train"
 VALIDATION_IMAGES_FILE="${DATASET_DIR}/validation_images.txt"
 SUMMARY_FILE="${DATASET_DIR}/summary.json"
